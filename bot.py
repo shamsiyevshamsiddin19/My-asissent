@@ -1,7 +1,7 @@
-
 import logging
 import re
-from datetime import datetime
+import sqlite3
+from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -23,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Conversation states
-CHOOSING_CHANNEL, ENTERING_MESSAGE, ENTERING_TIME, CONFIRMING_DATE = range(4)
+CHOOSING_CHANNEL, ENTERING_MESSAGE, ENTERING_TIME, CONFIRMING_DATE, ENTERING_CHALLENGE_DAY, ENTERING_END_DATE = range(6)
 
 class ChallengeBot:
     def __init__(self):
@@ -32,10 +32,11 @@ class ChallengeBot:
         self.application = (
             Application.builder()
             .token(BOT_TOKEN)
-            .post_init(self.setup_scheduler)
             .build()
         )
         self.setup_handlers()
+        # Scheduler'ni ishga tushirish
+        self.setup_scheduler_sync()
     
     def setup_handlers(self):
         """Handler'larni sozlash"""
@@ -58,6 +59,14 @@ class ChallengeBot:
                 ],
                 CONFIRMING_DATE: [
                     CallbackQueryHandler(self.date_confirmed, pattern='^date_'),
+                    CommandHandler('cancel', self.cancel)
+                ],
+                ENTERING_CHALLENGE_DAY: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.challenge_day_entered),
+                    CommandHandler('cancel', self.cancel)
+                ],
+                ENTERING_END_DATE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.end_date_entered),
                     CommandHandler('cancel', self.cancel)
                 ]
             },
@@ -299,39 +308,222 @@ Men Challenge Bot - har kuni avtomatik xabar yuborish uchun yaratilgan bot.
         channel_id = context.user_data.get('selected_channel', '')
         message_text = context.user_data.get('message_text', '')
         time_text = context.user_data.get('time', '')
-        start_date = datetime.now(pytz.timezone(TIMEZONE)).strftime('%Y-%m-%d')
-
-        schedule_id = self.db.add_schedule(
-            user_id, channel_id, message_text, time_text, with_date, start_date
-        )
-        if self.scheduler:
-            self.scheduler.add_schedule_job(
-                user_id, channel_id, schedule_id, time_text, message_text, with_date, start_date
+        
+        if with_date:
+            # Challenge kunini so'rash
+            await query.edit_message_text(
+                "📅 Challenge kunini kiriting:\n\n"
+                "Masalan: 1 \n\n"
+               
+                "Bekor qilish uchun /cancel"
             )
+            context.user_data['with_date'] = True
+            return ENTERING_CHALLENGE_DAY
+        else:
+            # Sana qo'shilmasin
+            start_date = datetime.now(pytz.timezone(TIMEZONE)).strftime('%Y-%m-%d')
+            return await self.create_schedule(user_id, channel_id, message_text, time_text, False, start_date, context, update)
 
-        channels = self.db.get_user_channels(user_id)
-        kanal_nomi = next((name for cid, name in channels if cid == channel_id), channel_id)
-        sana_ha = 'Ha' if with_date else "Yo'q"
-        user_schedules = self.db.get_user_schedules(user_id)
-        reja_raqami = 1
-        for idx, sched in enumerate(user_schedules, 1):
-            if sched[0] == schedule_id:
-                reja_raqami = idx
-                break
-        status_text = f"""
+    async def challenge_day_entered(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Challenge kunini olish"""
+        if not update.message or not update.message.text:
+            return ENTERING_CHALLENGE_DAY
+        
+        challenge_day_text = update.message.text.strip()
+        
+        # Raqam ekanligini tekshirish
+        if not challenge_day_text.isdigit():
+            await update.message.reply_text(
+                "❌ Noto'g'ri format!\n\n"
+                "Faqat raqam kiriting. Masalan: 1, 15, 30"
+            )
+            return ENTERING_CHALLENGE_DAY
+        
+        challenge_day = int(challenge_day_text)
+        if challenge_day < 1 or challenge_day > 365:
+            await update.message.reply_text(
+                "❌ Challenge kuni 1-365 oralig'ida bo'lishi kerak!\n\n"
+                "Qaytadan kiriting:"
+            )
+            return ENTERING_CHALLENGE_DAY
+        
+        try:
+            # Bugungi sanadan challenge kunini hisoblash
+            today = datetime.now(pytz.timezone(TIMEZONE))
+            # start_date ni timezone bilan yaratish
+            start_date_dt = today - timedelta(days=challenge_day-1)
+            start_date = start_date_dt.strftime('%Y-%m-%d')
+            
+            user_id = update.effective_user.id if update.effective_user else None
+            if not user_id:
+                await update.message.reply_text("❌ Foydalanuvchi ma'lumotlari topilmadi.")
+                return ConversationHandler.END
+                
+            # context.user_data ni xavfsiz olish
+            user_data = context.user_data if context.user_data else {}
+            user_data['start_date'] = start_date  # start_date'ni context'ga saqlash
+            if context.user_data is not None:
+                context.user_data.update(user_data)  # Direct assignment o'rniga update() ishlatamiz
+            
+            # End date'ni so'rash
+            await update.message.reply_text(
+                "📅 Challenge tugash sanasini kiriting:\n\n"
+                "Format: DD.MM.YYYY\n"
+                "Masalan: 01.09.2028\n\n"
+                "Bekor qilish uchun /cancel"
+            )
+            return ENTERING_END_DATE
+            
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Xatolik yuz berdi: {str(e)}\n\n"
+                "Qaytadan urinib ko'ring:"
+            )
+            return ENTERING_CHALLENGE_DAY
+
+    async def end_date_entered(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """End date'ni olish"""
+        if not update.message or not update.message.text:
+            return ENTERING_END_DATE
+        
+        end_date_text = update.message.text.strip()
+        
+        # Sana formatini tekshirish (DD.MM.YYYY)
+        import re
+        if not re.match(r'^\d{2}\.\d{2}\.\d{4}$', end_date_text):
+            await update.message.reply_text(
+                "❌ Noto'g'ri format!\n\n"
+                "To'g'ri format: DD.MM.YYYY\n"
+                "Masalan: 01.09.2028"
+            )
+            return ENTERING_END_DATE
+        
+        try:
+            # Sana formatini parse qilish
+            day, month, year = map(int, end_date_text.split('.'))
+            end_date_dt = datetime(year, month, day)
+            
+            # Bugungi sanani olish
+            today = datetime.now(pytz.timezone(TIMEZONE))
+            
+            # End date bugungi sanadan oldin bo'lsa xatolik
+            if end_date_dt.date() <= today.date():
+                await update.message.reply_text(
+                    "❌ Challenge tugash sanasi bugungi sanadan keyin bo'lishi kerak!\n\n"
+                    "Qaytadan kiriting:"
+                )
+                return ENTERING_END_DATE
+            
+            # End date'ni YYYY-MM-DD formatiga o'tkazish
+            end_date_str = end_date_dt.strftime('%Y-%m-%d')
+            
+            user_id = update.effective_user.id if update.effective_user else None
+            if not user_id:
+                await update.message.reply_text("❌ Foydalanuvchi ma'lumotlari topilmadi.")
+                return ConversationHandler.END
+                
+            # context.user_data ni xavfsiz olish
+            user_data = context.user_data if context.user_data else {}
+            channel_id = user_data.get('selected_channel', '')
+            message_text = user_data.get('message_text', '')
+            time_text = user_data.get('time', '')
+            start_date = user_data.get('start_date', '')
+            
+            if not start_date:
+                await update.message.reply_text("❌ Boshlang'ich sana topilmadi. Qaytadan urinib ko'ring.")
+                return ConversationHandler.END
+            
+            return await self.create_schedule(user_id, channel_id, message_text, time_text, True, start_date, context, update, end_date_str)
+        except ValueError as e:
+            await update.message.reply_text(
+                "❌ Noto'g'ri sana!\n\n"
+                "To'g'ri format: DD.MM.YYYY\n"
+                "Masalan: 01.09.2028"
+            )
+            return ENTERING_END_DATE
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Xatolik yuz berdi: {str(e)}\n\n"
+                "Qaytadan urinib ko'ring:"
+            )
+            return ENTERING_END_DATE
+
+    async def create_schedule(self, user_id, channel_id, message_text, time_text, with_date, start_date, context, update, end_date_str=None):
+        """Rejani yaratish"""
+        try:
+            schedule_id = self.db.add_schedule(
+                user_id, channel_id, message_text, time_text, with_date, start_date, end_date_str or ""
+            )
+            if self.scheduler:
+                self.scheduler.add_schedule_job(
+                    user_id, channel_id, schedule_id, time_text, message_text, with_date, start_date, end_date_str or ""
+                )
+
+            channels = self.db.get_user_channels(user_id)
+            kanal_nomi = next((name for cid, name in channels if cid == channel_id), channel_id)
+            sana_ha = 'Ha' if with_date else "Yo'q"
+            user_schedules = self.db.get_user_schedules(user_id)
+            reja_raqami = 1
+            for idx, sched in enumerate(user_schedules, 1):
+                if sched[0] == schedule_id:
+                    reja_raqami = idx
+                    break
+            
+            challenge_info = ""
+            if with_date:
+                # start_date ni timezone bilan parse qilish
+                start_date_dt = datetime.strptime(start_date, '%Y-%m-%d').replace(tzinfo=pytz.timezone(TIMEZONE))
+                today = datetime.now(pytz.timezone(TIMEZONE))
+                challenge_day = (today - start_date_dt).days + 1
+                
+                if end_date_str:
+                    end_date_dt = datetime.strptime(end_date_str, '%Y-%m-%d').replace(tzinfo=pytz.timezone(TIMEZONE))
+                    total_days = (end_date_dt - start_date_dt).days + 1
+                    remaining_days = (end_date_dt - today).days
+                    
+                    challenge_info = f"\n🎯 Challenge kuni: {challenge_day}/{total_days}"
+                    if remaining_days > 0:
+                        challenge_info += f"\n⏰ Qolgan kunlar: {remaining_days}"
+                    else:
+                        challenge_info += f"\n✅ Challenge tugagan!"
+                else:
+                    challenge_info = f"\n🎯 Challenge kuni: {challenge_day}"
+            
+            status_text = f"""
 ✅ Reja muvaffaqiyatli yaratildi!
 
 📢 Kanal: {kanal_nomi}
 ⏰ Vaqt: {time_text}
-📅 Sana qo'shiladi: {sana_ha}
+📅 Sana qo'shiladi: {sana_ha}{challenge_info}
 🔢 Reja raqami: {reja_raqami}
 
 Xabar har kuni {time_text} da yuboriladi.
     """
-        await query.edit_message_text(status_text)
-        if context.user_data is not None:
-            context.user_data.clear()
-        return ConversationHandler.END
+            
+            # Xabar yuborish usulini aniqlash
+            if hasattr(update, 'edit_message_text'):
+                await update.edit_message_text(status_text)
+            elif hasattr(update, 'message') and update.message:
+                await update.message.reply_text(status_text)
+            else:
+                # Agar hech qanday usul ishlamasa, yangi xabar yuborish
+                if hasattr(update, 'effective_user') and update.effective_user:
+                    await self.application.bot.send_message(
+                        chat_id=update.effective_user.id,
+                        text=status_text
+                    )
+            
+            if context.user_data is not None:
+                context.user_data.clear()
+            return ConversationHandler.END
+            
+        except Exception as e:
+            error_text = f"❌ Reja yaratishda xatolik: {str(e)}"
+            if hasattr(update, 'message') and update.message:
+                await update.message.reply_text(error_text)
+            elif hasattr(update, 'edit_message_text'):
+                await update.edit_message_text(error_text)
+            return ConversationHandler.END
     
     async def my_schedules(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Foydalanuvchining rejalarini dublikatlarsiz, har biriga alohida o'chirish tugmasi bilan ko'rsatish"""
@@ -400,33 +592,72 @@ Xabar har kuni {time_text} da yuboriladi.
             await update.message.reply_text("❌ Amaliyot bekor qilindi.")
         return ConversationHandler.END
     
-    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
+    async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Xatoliklarni qayd qilish"""
         logger.error(f"Xatolik: {context.error}")
-        from telegram import Update as TgUpdate
-        if isinstance(update, TgUpdate) and update.message:
+        if hasattr(update, "message") and getattr(update, "message", None) is not None:
             await update.message.reply_text(
                 "❌ Kutilmagan xatolik yuz berdi. Iltimos, qaytadan urinib ko'ring."
             )
     
-    async def setup_scheduler(self, app):
-        """Scheduler'ni ishga tushirish va barcha mavjud rejalarni yuklash"""
+    def setup_scheduler_sync(self):
+        """Scheduler'ni sinxron tarzda ishga tushirish"""
         self.scheduler = MessageScheduler(self.application.bot)
-        import sqlite3
+        
+        # Scheduler'ni keyinroq ishga tushirish (event loop ishlaganda)
+        # self.scheduler.start()
+       
         all_schedules = []
         with sqlite3.connect(self.db.db_file) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, user_id, channel_id, message, time, with_date, start_date FROM schedules")
+            cursor.execute("SELECT id, user_id, channel_id, message, time, with_date, start_date, end_date FROM schedules")
             all_schedules = cursor.fetchall()
         for schedule in all_schedules:
-            schedule_id, user_id, channel_id, message, time, with_date, start_date = schedule
+            schedule_id, user_id, channel_id, message, time, with_date, start_date, end_date = schedule
             self.scheduler.add_schedule_job(
-                user_id, channel_id, schedule_id, time, message, bool(with_date), start_date
+                user_id, channel_id, schedule_id, time, message, bool(with_date), start_date, end_date or ""
+            )
+
+    async def setup_scheduler(self):
+        """Scheduler'ni ishga tushirish va barcha mavjud rejalarni yuklash"""
+        self.scheduler = MessageScheduler(self.application.bot)
+        
+        # Scheduler'ni ishga tushirish
+        self.scheduler.start()
+       
+        all_schedules = []
+        with sqlite3.connect(self.db.db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, user_id, channel_id, message, time, with_date, start_date, end_date FROM schedules")
+            all_schedules = cursor.fetchall()
+        for schedule in all_schedules:
+            schedule_id, user_id, channel_id, message, time, with_date, start_date, end_date = schedule
+            self.scheduler.add_schedule_job(
+                user_id, channel_id, schedule_id, time, message, bool(with_date), start_date, end_date or ""
             )
 
     def run(self):
-        self.application.run_polling()
+        """Botni ishga tushirish"""
+        async def start_bot():
+            # Scheduler'ni ishga tushirish
+            if self.scheduler:
+                self.scheduler.start()
+            # Bot'ni ishga tushirish
+            if self.application:
+                await self.application.initialize()
+                await self.application.start()
+                if self.application.updater:
+                    await self.application.updater.start_polling()
+                # Bot'ni to'xtatmaslik uchun kutish
+                try:
+                    await asyncio.Event().wait()
+                except KeyboardInterrupt:
+                    await self.application.stop()
+                    await self.application.shutdown()
+        
+        import asyncio
+        asyncio.run(start_bot())
 
 if __name__ == '__main__':
     bot = ChallengeBot()
-    bot.run() 
+    bot.run()

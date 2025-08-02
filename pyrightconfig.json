@@ -1,0 +1,22 @@
+{
+  "include": ["."],
+  "exclude": ["**/node_modules", "**/__pycache__", ".venv"],
+  "ignore": [],
+  "defineConstant": {},
+  "typeCheckingMode": "basic",
+  "useLibraryCodeForTypes": true,
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": false,
+  "pythonVersion": "3.10",
+  "pythonPlatform": "Windows",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "pythonVersion": "3.10",
+      "pythonPlatform": "Windows",
+      "extraPaths": [
+        "C:\\Users\\user\\AppData\\Local\\Programs\\Python\\Python310\\Lib\\site-packages"
+      ]
+    }
+  ]
+}

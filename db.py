@@ -45,10 +45,19 @@ class Database:
                     time TEXT,
                     with_date INTEGER DEFAULT 0,
                     start_date TEXT,
+                    end_date TEXT,
                     day_count INTEGER DEFAULT 1,
                     FOREIGN KEY (user_id) REFERENCES users (user_id)
                 )
             ''')
+            
+            # end_date ustunini qo'shish (agar yo'q bo'lsa)
+            try:
+                cursor.execute('ALTER TABLE schedules ADD COLUMN end_date TEXT')
+                logger.info("end_date ustuni qo'shildi")
+            except sqlite3.OperationalError:
+                # Ustun allaqachon mavjud
+                pass
             
             conn.commit()
             logger.info("Database jadvallari yaratildi")
@@ -84,14 +93,14 @@ class Database:
             return cursor.fetchall()
     
     def add_schedule(self, user_id: int, channel_id: str, message: str, 
-                    time: str, with_date: bool, start_date: str) -> int:
+                    time: str, with_date: bool, start_date: str, end_date: str = None) -> int:
         """Reja qo'shish"""
         with sqlite3.connect(self.db_file) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO schedules (user_id, channel_id, message, time, with_date, start_date)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (user_id, channel_id, message, time, int(with_date), start_date))
+                INSERT INTO schedules (user_id, channel_id, message, time, with_date, start_date, end_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (user_id, channel_id, message, time, int(with_date), start_date, end_date))
             conn.commit()
             return cursor.lastrowid
     
