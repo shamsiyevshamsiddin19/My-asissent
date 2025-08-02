@@ -27,30 +27,34 @@ class MessageScheduler:
                 logger.info("Scheduler ishga tushirildi")
             except RuntimeError as e:
                 if "no running event loop" in str(e):
-                    logger.info("Scheduler event loop yo'q, keyinroq ishga tushiriladi")
+                    logger.warning("Scheduler event loop yo'q, iltimos, asosiy event loopdan ishga tushiring.")
                 else:
+                    logger.error(f"Scheduler start xatoligi: {e}")
                     raise e
     
     def add_schedule_job(self, user_id: int, channel_id: str, schedule_id: int, 
                         time: str, message: str, with_date: bool, start_date: str, end_date: str = ""):
-        hour, minute = map(int, time.split(':'))
-        job_id = f"{user_id}_{channel_id}_{time}"
         try:
-            self.scheduler.remove_job(job_id)
-        except:
-            pass
-        # Ensure message, start_date, and end_date are not None
-        safe_message = message if message is not None else ""
-        safe_start_date = start_date if start_date is not None else "1970-01-01"
-        safe_end_date = end_date if end_date is not None else ""
-        self.scheduler.add_job(
-            func=self.send_scheduled_message,  # Async function directly
-            trigger=self.CronTrigger(hour=hour, minute=minute),
-            id=job_id,
-            args=[user_id, channel_id, schedule_id, safe_message, with_date, safe_start_date, safe_end_date],
-            replace_existing=True
-        )
-        logger.info(f"Yangi reja qo'shildi: {job_id}")
+            hour, minute = map(int, time.split(':'))
+            job_id = f"{user_id}_{channel_id}_{time}"
+            try:
+                self.scheduler.remove_job(job_id)
+            except Exception as e:
+                logger.debug(f"Oldingi jobni o'chirishda xatolik yoki mavjud emas: {e}")
+            # Ensure message, start_date, and end_date are not None
+            safe_message = message if message is not None else ""
+            safe_start_date = start_date if start_date is not None else "1970-01-01"
+            safe_end_date = end_date if end_date is not None else ""
+            self.scheduler.add_job(
+                func=self.send_scheduled_message,  # Async function directly
+                trigger=self.CronTrigger(hour=hour, minute=minute),
+                id=job_id,
+                args=[user_id, channel_id, schedule_id, safe_message, with_date, safe_start_date, safe_end_date],
+                replace_existing=True
+            )
+            logger.info(f"Yangi reja qo'shildi: {job_id}")
+        except Exception as e:
+            logger.error(f"Job qo'shishda xatolik: {e}")
 
     async def send_scheduled_message(self, user_id: int, channel_id: str, schedule_id: int, message: str, with_date: bool, start_date: str, end_date: str = ""): 
         try:

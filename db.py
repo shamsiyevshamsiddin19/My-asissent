@@ -51,19 +51,24 @@ class Database:
                 )
             ''')
             
-            # end_date ustunini qo'shish (agar yo'q bo'lsa)
-            try:
-                cursor.execute('ALTER TABLE schedules ADD COLUMN end_date TEXT')
-                logger.info("end_date ustuni qo'shildi")
-            except sqlite3.OperationalError:
-                # Ustun allaqachon mavjud
-                pass
-            
+            # end_date ustunini faqat birinchi marta qo'shish
+            cursor.execute("PRAGMA table_info(schedules)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'end_date' not in columns:
+                try:
+                    cursor.execute('ALTER TABLE schedules ADD COLUMN end_date TEXT')
+                    logger.info("end_date ustuni qo'shildi")
+                except sqlite3.OperationalError:
+                    pass
             conn.commit()
             logger.info("Database jadvallari yaratildi")
     
-    def add_user(self, user_id: int, username: str = None):
+    def add_user(self, user_id: int, username: Optional[str] = None):
         """Foydalanuvchi qo'shish"""
+        if username is None:
+            username = ""
+        if not isinstance(username, str):
+            username = str(username)
         with sqlite3.connect(self.db_file) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -92,9 +97,21 @@ class Database:
             )
             return cursor.fetchall()
     
-    def add_schedule(self, user_id: int, channel_id: str, message: str, 
-                    time: str, with_date: bool, start_date: str, end_date: str = None) -> int:
+    def add_schedule(self, user_id: int, channel_id: str, message: Optional[str], 
+                    time: str, with_date: bool, start_date: Optional[str], end_date: Optional[str] = None) -> int:
         """Reja qo'shish"""
+        if message is None:
+            message = ""
+        if not isinstance(message, str):
+            message = str(message)
+        if start_date is None:
+            start_date = "1970-01-01"
+        if not isinstance(start_date, str):
+            start_date = str(start_date)
+        if end_date is None:
+            end_date = ""
+        if not isinstance(end_date, str):
+            end_date = str(end_date)
         with sqlite3.connect(self.db_file) as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -102,7 +119,10 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (user_id, channel_id, message, time, int(with_date), start_date, end_date))
             conn.commit()
-            return cursor.lastrowid
+            last_id = cursor.lastrowid
+            if last_id is None:
+                return 0
+            return int(last_id)
     
     def get_user_schedules(self, user_id: int) -> List[Tuple]:
         """Foydalanuvchining rejalarini olish"""
@@ -129,6 +149,8 @@ class Database:
     
     def update_day_count(self, schedule_id: int, day_count: int):
         """Challenge kunini yangilash"""
+        if day_count is None:
+            day_count = 1
         with sqlite3.connect(self.db_file) as conn:
             cursor = conn.cursor()
             cursor.execute(

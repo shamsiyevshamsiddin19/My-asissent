@@ -95,7 +95,14 @@ class ChallengeBot:
         self.application.add_handler(CallbackQueryHandler(self.delete_channel_callback, pattern="^deletechan_"))
         
         # Xatoliklar uchun
-        self.application.add_error_handler(self.error_handler)
+        # add_error_handler expects (object, context) not (Update, context)
+        async def error_handler_wrapper(update_or_obj, context):
+            # Only call if update_or_obj is Update
+            if isinstance(update_or_obj, Update):
+                await self.error_handler(update_or_obj, context)
+            # else: do nothing (do not call with None)
+        self.application.add_error_handler(error_handler_wrapper)
+
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Botni ishga tushirish"""
@@ -451,69 +458,44 @@ Men Challenge Bot - har kuni avtomatik xabar yuborish uchun yaratilgan bot.
     async def create_schedule(self, user_id, channel_id, message_text, time_text, with_date, start_date, context, update, end_date_str=None):
         """Rejani yaratish"""
         try:
+            # Defensive defaults
+            if message_text is None:
+                message_text = ""
+            if start_date is None:
+                start_date = datetime.now(pytz.timezone(TIMEZONE)).strftime('%Y-%m-%d')
+            if end_date_str is None:
+                end_date_str = ""
             schedule_id = self.db.add_schedule(
-                user_id, channel_id, message_text, time_text, with_date, start_date, end_date_str or ""
+                user_id, channel_id, message_text, time_text, with_date, start_date, end_date_str
             )
             if self.scheduler:
                 self.scheduler.add_schedule_job(
-                    user_id, channel_id, schedule_id, time_text, message_text, with_date, start_date, end_date_str or ""
+                    user_id, channel_id, schedule_id, time_text, message_text, with_date, start_date, end_date_str
                 )
-
             channels = self.db.get_user_channels(user_id)
             kanal_nomi = next((name for cid, name in channels if cid == channel_id), channel_id)
-            sana_ha = 'Ha' if with_date else "Yo'q"
-            user_schedules = self.db.get_user_schedules(user_id)
-            reja_raqami = 1
-            for idx, sched in enumerate(user_schedules, 1):
-                if sched[0] == schedule_id:
-                    reja_raqami = idx
-                    break
-            
-            challenge_info = ""
+            status_text = (
+                f"✅ Xabar rejalashtirildi!\n\n"
+                f"📢 Kanal: {kanal_nomi}\n"
+                f"🕒 Vaqt: {time_text}\n"
+            )
             if with_date:
-                # start_date ni timezone bilan parse qilish
-                start_date_dt = datetime.strptime(start_date, '%Y-%m-%d').replace(tzinfo=pytz.timezone(TIMEZONE))
-                today = datetime.now(pytz.timezone(TIMEZONE))
-                challenge_day = (today - start_date_dt).days + 1
-                
-                if end_date_str:
-                    end_date_dt = datetime.strptime(end_date_str, '%Y-%m-%d').replace(tzinfo=pytz.timezone(TIMEZONE))
-                    total_days = (end_date_dt - start_date_dt).days + 1
-                    remaining_days = (end_date_dt - today).days
-                    
-                    challenge_info = f"\n🎯 Challenge kuni: {challenge_day}/{total_days}"
-                    if remaining_days > 0:
-                        challenge_info += f"\n⏰ Qolgan kunlar: {remaining_days}"
-                    else:
-                        challenge_info += f"\n✅ Challenge tugagan!"
+                status_text += f"📅 Sana: {start_date}"
+            try:
+                if hasattr(update, 'message') and update.message:
+                    await update.message.reply_text(status_text)
+                elif hasattr(update, 'edit_message_text'):
+                    await update.edit_message_text(status_text)
                 else:
-                    challenge_info = f"\n🎯 Challenge kuni: {challenge_day}"
-            
-            status_text = f"""
-✅ Reja muvaffaqiyatli yaratildi!
-
-📢 Kanal: {kanal_nomi}
-⏰ Vaqt: {time_text}
-📅 Sana qo'shiladi: {sana_ha}{challenge_info}
-🔢 Reja raqami: {reja_raqami}
-
-Xabar har kuni {time_text} da yuboriladi.
-    """
-            
-            # Xabar yuborish usulini aniqlash
-            if hasattr(update, 'edit_message_text'):
-                await update.edit_message_text(status_text)
-            elif hasattr(update, 'message') and update.message:
-                await update.message.reply_text(status_text)
-            else:
-                # Agar hech qanday usul ishlamasa, yangi xabar yuborish
-                if hasattr(update, 'effective_user') and update.effective_user:
-                    await self.application.bot.send_message(
-                        chat_id=update.effective_user.id,
-                        text=status_text
-                    )
-            
-            if context.user_data is not None:
+                    # Agar hech qanday usul ishlamasa, yangi xabar yuborish
+                    if hasattr(update, 'effective_user') and update.effective_user:
+                        await self.application.bot.send_message(
+                            chat_id=update.effective_user.id,
+                            text=status_text
+                        )
+            except Exception as e:
+                logger.warning(f"Status xabarini yuborishda xatolik: {e}")
+            if hasattr(context, 'user_data') and context.user_data is not None:
                 context.user_data.clear()
             return ConversationHandler.END
             
@@ -588,14 +570,14 @@ Xabar har kuni {time_text} da yuboriladi.
         """Conversation'ni bekor qilish"""
         if context.user_data:
             context.user_data.clear()
-        if update.message:
+        if update is not None and hasattr(update, 'message') and update.message is not None:
             await update.message.reply_text("❌ Amaliyot bekor qilindi.")
         return ConversationHandler.END
     
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Xatoliklarni qayd qilish"""
         logger.error(f"Xatolik: {context.error}")
-        if hasattr(update, "message") and getattr(update, "message", None) is not None:
+        if update is not None and hasattr(update, "message") and update.message is not None:
             await update.message.reply_text(
                 "❌ Kutilmagan xatolik yuz berdi. Iltimos, qaytadan urinib ko'ring."
             )
